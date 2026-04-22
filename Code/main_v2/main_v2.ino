@@ -16,7 +16,7 @@
 #define LED_NUM             32    // Количество ступеней
 
 #define NIGHT_FADE_MS       1500UL
-#define BREATH_MIN_RATIO    0.03f
+#define BREATH_MIN_RATIO    0.06f
 #define BREATH_MAX_RATIO    0.20f
 #define BREATH_PERIOD_MS    4000UL
 #define BREATH_RECOVER_MS   300UL

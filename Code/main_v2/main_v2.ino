@@ -9,15 +9,16 @@
 // ==============================================================================
 #define ACTIVE_MODE         1     // 0 = NIGHT_FADE, 1 = ASYMMETRIC
 #define WAITING_ANIMATION   1     // 0 = ВЫКЛ, 1 = ВКЛ (BREATHING)
-#define DIAG_MODE           0     // 🔍 1 = ТОЛЬКО диагностика (Serial), 0 = рабочий режим
-#define LDR_BLOCKING        0     // 0 = PIR срабатывает ВСЕГДА, 1 = PIR только в темноте
-#define LDR_DARK_IS_LOW     1     // 1 = темнота = низкий ADC, 0 = темнота = высокий ADC
-#define ENV_BRIGHTNESS      30000 // Порог срабатывания LDR
+#define DIAG_MODE           1     // 🔍 1 = ТОЛЬКО диагностика (Serial), 0 = рабочий режим
+#define LDR_BLOCKING        1     // 0 = PIR срабатывает ВСЕГДА, 1 = PIR только в темноте
+#define LDR_DARK_IS_LOW     1     // APDS-9930: Низкое значение = Темно. Оставить 1.
+#define ENV_BRIGHTNESS      3000  // 🌟 Базовый порог освещённости
+#define LIGHT_HYSTERESIS    200   // 🔄 Гистерезис (±200). Зона неопределённости
 #define LED_NUM             32    // Количество ступеней
 
 #define NIGHT_FADE_MS       1500UL
-#define BREATH_MIN_RATIO    0.06f
-#define BREATH_MAX_RATIO    0.20f
+#define BREATH_MIN_RATIO    0.05f
+#define BREATH_MAX_RATIO    0.25f
 #define BREATH_PERIOD_MS    4000UL
 #define BREATH_RECOVER_MS   300UL
 #define PIR_DEBOUNCE_MS     500UL
@@ -27,8 +28,44 @@
 // ==============================================================================
 const uint8_t PCA_ADDRS[] = {0x40, 0x41};
 const int NUM_DRIVERS = sizeof(PCA_ADDRS) / sizeof(PCA_ADDRS[0]);
-const uint8_t PIR1_PIN = 11, PIR2_PIN = 12, LDR_PIN = 26, POT_TIME_PIN = 27, POT_BRIGHT_PIN = 28;
+const uint8_t PIR1_PIN = 11, PIR2_PIN = 12, POT_TIME_PIN = 27, POT_BRIGHT_PIN = 28;
 const uint8_t OE_PIN = 10, I2C_SDA = 8, I2C_SCL = 9;
+
+// ==============================================================================
+// 📦 ДРАЙВЕР APDS-9930 (только ALS канал)
+// ==============================================================================
+class APDS9930_ALS {
+private:
+    TwoWire* _wire;
+    void writeReg(uint8_t reg, uint8_t val) {
+        _wire->beginTransmission(0x39);
+        _wire->write(reg | 0x80);
+        _wire->write(val);
+        _wire->endTransmission();
+    }
+public:
+    void begin(TwoWire* wire) {
+        _wire = wire;
+        writeReg(0x01, 0xD5);
+        writeReg(0x0F, 0x00);
+        writeReg(0x00, 0x01);
+        delay(3);
+        writeReg(0x00, 0x03);
+        delay(150);
+    }
+
+    uint16_t readALS() {
+        _wire->beginTransmission(0x39);
+        _wire->write(0x14 | 0x80);
+        _wire->endTransmission(false);
+        if (_wire->requestFrom(0x39, (uint8_t)2) == 2) {
+            uint16_t ch0 = _wire->read();
+            ch0 |= _wire->read() << 8;
+            return ch0;
+        }
+        return 0;
+    }
+};
 
 // ==============================================================================
 // 🏗️ КЛАСС КОНТРОЛЛЕРА
@@ -36,6 +73,7 @@ const uint8_t OE_PIN = 10, I2C_SDA = 8, I2C_SCL = 9;
 class StairLightController {
 private:
     Adafruit_PWMServoDriver* drivers[NUM_DRIVERS];
+    APDS9930_ALS apds;
     
     enum State { IDLE, PRE_ACTIVE, ACTIVE, POST_ACTIVE, TO_IDLE };
     State state = IDLE;
@@ -51,16 +89,9 @@ private:
     unsigned long breath_start = 0;
     unsigned long trans_start = 0, trans_duration = 0;
     uint16_t trans_from = 0, trans_to = 0;
-
-    // 🔍 Программное усреднение LDR (убирает случайные скачки АЦП)
-    uint16_t readLDR_Average() const {
-        uint32_t sum = 0;
-        for (uint8_t i = 0; i < 8; i++) {
-            sum += analogRead(LDR_PIN);
-            delayMicroseconds(300); // Небольшая пауза для стабилизации входа АЦП
-        }
-        return sum >> 3; // Деление на 8
-    }
+    
+    bool _is_dark_state = false;
+    bool _prev_dark_state = false; // 🔄 Для детекции перехода свет->тьма
 
     uint16_t applyGamma(uint16_t val) const {
         if (val <= 0) return 0;
@@ -89,9 +120,8 @@ private:
         trans_from = from; trans_to = to;
     }
 
-    // 🔥 Гарантированный старт с 0% яркости
     void startWave(int dir) {
-        turnOffAll(); // Сбрасываем все каналы в 0 перед запуском волны
+        turnOffAll();
         anim_dir = dir;
         memset(start_times, 0, sizeof(start_times));
         int first = (dir == 1) ? 0 : LED_NUM - 1;
@@ -100,14 +130,13 @@ private:
         last_schedule_ms = millis();
     }
 
-    // 🔹 РАСЧЁТ ТАЙМИНГОВ
     void calcTimings(uint32_t &up, uint32_t &pause, uint32_t &down) {
-        if (ACTIVE_MODE == 1) { // ASYMMETRIC
-            const float SLOW_FACTOR = 2.4f; // 🐌 Замедление на 140% относительно базы
+        if (ACTIVE_MODE == 1) {
+            const float SLOW_FACTOR = 2.4f;
             up    = (uint32_t)(led_time * 0.2f * SLOW_FACTOR);
             pause = 0;
             down  = (uint32_t)(led_time * 0.8f * SLOW_FACTOR);
-        } else { // NIGHT_FADE
+        } else {
             up    = (uint32_t)(led_time * 0.35f);
             pause = (uint32_t)(led_time * 0.3f);
             down  = (uint32_t)(led_time * 0.35f);
@@ -141,42 +170,63 @@ public:
         analogReadResolution(16);
 
         for (int i = 0; i < NUM_DRIVERS; i++) {
-            drivers[i] = new Adafruit_PWMServoDriver(PCA_ADDRS[i], Wire);
-            drivers[i]->begin(); drivers[i]->setPWMFreq(1000);
+            drivers[i] = new Adafruit_PWMServoDriver(PCA_ADDRS[i], Wire); // ✅ Исправлено: убран &
+            drivers[i]->begin(); 
+            drivers[i]->setPWMFreq(1000);
         }
 
+        apds.begin(&Wire);
+        delay(200);
+        
+        _is_dark_state = (apds.readALS() < ENV_BRIGHTNESS);
+        _prev_dark_state = _is_dark_state;
+        
         turnOffAll();
         breath_start = millis();
         
         #if DIAG_MODE == 1
             Serial.println("=== DIAG MODE ACTIVE ===");
-            Serial.println("LDR: <фото> | POT_B: <яркость> | POT_T: <время> | PIR1: <0/1> | PIR2: <0/1>");
+            Serial.println("APDS: <освещение> | POT_B: <яркость> | POT_T: <время> | PIR1: <0/1> | PIR2: <0/1>");
         #endif
     }
 
     void update() {
-        // 🔍 РЕЖИМ ДИАГНОСТИКИ
         #if DIAG_MODE == 1
             static unsigned long last_diag = 0;
             if (millis() - last_diag >= 500) {
                 last_diag = millis();
-                uint16_t ldr = readLDR_Average(); // ✅ Усреднённое чтение
+                uint16_t lux_raw = apds.readALS();
                 uint16_t pot_b = analogRead(POT_BRIGHT_PIN);
                 uint16_t pot_t = analogRead(POT_TIME_PIN);
                 uint8_t p1 = digitalRead(PIR1_PIN);
                 uint8_t p2 = digitalRead(PIR2_PIN);
-                Serial.printf("LDR: %5u | POT_B: %5u | POT_T: %5u | PIR1: %d | PIR2: %d\n", ldr, pot_b, pot_t, p1, p2);
+                Serial.printf("APDS: %5u | POT_B: %5u | POT_T: %5u | PIR1: %d | PIR2: %d\n", lux_raw, pot_b, pot_t, p1, p2);
             }
             return;
         #endif
 
-        uint16_t ldr = readLDR_Average(); // ✅ Усреднённое чтение
+        uint16_t lux_raw = apds.readALS();
         uint16_t pot_b = analogRead(POT_BRIGHT_PIN);
         uint16_t pot_t = analogRead(POT_TIME_PIN);
         
         led_brightness = (uint16_t)((pot_b / 65535.0f) * 4095.0f);
         if (led_brightness < 200) led_brightness = 200;
         led_time = 500 + (uint32_t)((pot_t / 65535.0f) * 4500.0f);
+
+        // 🔄 ГИСТЕРЕЗИС + ДЕТЕКЦИЯ ПЕРЕХОДА
+        bool was_dark = _is_dark_state;
+        if (lux_raw < ENV_BRIGHTNESS - LIGHT_HYSTERESIS) {
+            _is_dark_state = true;
+        } else if (lux_raw > ENV_BRIGHTNESS + LIGHT_HYSTERESIS) {
+            _is_dark_state = false;
+        }
+
+        // 🌙 При переходе "свет -> тьма" сбрасываем фазу дыхания на минимум
+        if (_is_dark_state && !was_dark) {
+            breath_start = millis();
+        }
+        
+        bool is_dark = _is_dark_state;
 
         unsigned long now = millis();
         unsigned long elapsed = now - state_start;
@@ -186,10 +236,6 @@ public:
             bool p2 = digitalRead(PIR2_PIN);
             if (p1 || p2) {
                 last_pir_ms = now;
-                bool is_dark = true;
-                if (LDR_BLOCKING) {
-                    is_dark = LDR_DARK_IS_LOW ? (ldr < ENV_BRIGHTNESS) : (ldr >= ENV_BRIGHTNESS);
-                }
                 if (is_dark && state == IDLE && pending_dir == 0) {
                     pending_dir = p1 ? 1 : -1;
                 }
@@ -198,13 +244,15 @@ public:
 
         switch (state) {
             case IDLE:
-                if (WAITING_ANIMATION) {
+                if (WAITING_ANIMATION && is_dark) {
                     uint16_t v = getCurrentBreath();
                     for(int i=0; i<LED_NUM; i++) setLedPWM(i, v);
+                } else if (!is_dark) {
+                    turnOffAll();
                 }
-                if (pending_dir != 0) {
+
+                if (is_dark && pending_dir != 0) {
                     if (WAITING_ANIMATION) {
-                        // 🔥 Целевая яркость перехода теперь 0%, а не BREATH_MIN_RATIO
                         startTransition(getCurrentBreath(), 0, (led_time > 600 ? led_time/3 : 200));
                         setState(PRE_ACTIVE);
                     } else {

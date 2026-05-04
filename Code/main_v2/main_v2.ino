@@ -7,14 +7,14 @@
 // ==============================================================================
 // 🔧 КОНФИГУРАЦИЯ
 // ==============================================================================
-#define ACTIVE_MODE         1     // 0 = NIGHT_FADE, 1 = ASYMMETRIC
-#define WAITING_ANIMATION   1     // 0 = ВЫКЛ, 1 = ВКЛ (BREATHING)
-#define DIAG_MODE           1     // 🔍 1 = ТОЛЬКО диагностика (Serial), 0 = рабочий режим
+#define ACTIVE_MODE         0     // 0 = NIGHT_FADE, 1 = ASYMMETRIC
+#define WAITING_ANIMATION   0     // 0 = ВЫКЛ, 1 = ВКЛ (BREATHING)
+#define DIAG_MODE           0     // 🔍 1 = ТОЛЬКО диагностика (Serial), 0 = рабочий режим
 #define LDR_BLOCKING        1     // 0 = PIR срабатывает ВСЕГДА, 1 = PIR только в темноте
 #define LDR_DARK_IS_LOW     1     // APDS-9930: Низкое значение = Темно. Оставить 1.
-#define ENV_BRIGHTNESS      3000  // 🌟 Базовый порог освещённости
-#define LIGHT_HYSTERESIS    200   // 🔄 Гистерезис (±200). Зона неопределённости
-#define LED_NUM             32    // Количество ступеней
+#define ENV_BRIGHTNESS      60  // 🌟 Базовый порог освещённости
+#define LIGHT_HYSTERESIS    10   // 🔄 Гистерезис (±200). Зона неопределённости
+#define LED_NUM             15    // Количество ступеней
 
 #define NIGHT_FADE_MS       1500UL
 #define BREATH_MIN_RATIO    0.05f
